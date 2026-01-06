@@ -305,6 +305,17 @@ GROUP BY phase
 ORDER BY phase
 """,
 
+    "🌍 User Timezones": """
+-- See what timezone values are stored for users
+SELECT 
+    timezone,
+    COUNT(DISTINCT waid) as user_count
+FROM users
+WHERE timezone IS NOT NULL
+GROUP BY timezone
+ORDER BY user_count DESC
+""",
+
     "📅 Daily Active Users": """
 -- Daily active users who SENT messages (deduplicated by waid)
 SELECT 
@@ -680,15 +691,35 @@ with tab1:
                 
                 # Convert to user's timezone if available
                 if tz_str and not pd.isna(tz_str):
+                    tz_str = str(tz_str).strip()
+                    user_tz = None
+                    
+                    # Try direct pytz lookup first (e.g., "America/Sao_Paulo")
                     try:
                         user_tz = pytz.timezone(tz_str)
-                        ts = ts.astimezone(user_tz)
                     except:
-                        pass  # Keep UTC if timezone is invalid
+                        pass
+                    
+                    # Handle numeric offsets like "-3", "-03:00", "UTC-3", "GMT-3"
+                    if user_tz is None:
+                        import re
+                        # Extract numeric offset
+                        match = re.search(r'([+-]?\d{1,2})(?::?(\d{2}))?', tz_str)
+                        if match:
+                            hours = int(match.group(1))
+                            minutes = int(match.group(2) or 0)
+                            # Create fixed offset timezone
+                            from datetime import timedelta, timezone
+                            offset = timedelta(hours=hours, minutes=minutes)
+                            user_tz = timezone(offset)
+                    
+                    # Apply timezone conversion
+                    if user_tz:
+                        ts = ts.astimezone(user_tz)
                 
                 return ts.strftime("%b %d, %H:%M")
-            except:
-                return str(ts)
+            except Exception as e:
+                return str(ts)[:16]
         
         # Build display dataframe
         display_df = pd.DataFrame({
