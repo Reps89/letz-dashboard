@@ -317,6 +317,19 @@ GROUP BY timezone
 ORDER BY user_count DESC
 """,
 
+    "📅 User Activities Schema": """
+-- Explore user_activities table structure
+SELECT column_name, data_type 
+FROM information_schema.columns 
+WHERE table_name = 'user_activities'
+ORDER BY ordinal_position
+""",
+
+    "📅 User Activities Sample": """
+-- Sample of user_activities data
+SELECT * FROM user_activities LIMIT 10
+""",
+
     "📅 Daily Active Users": """
 -- Daily active users who SENT messages (deduplicated by waid)
 SELECT 
@@ -511,6 +524,82 @@ with tab1:
             st.info("No users found")
     except Exception as e:
         st.warning(f"Could not load journey stats: {e}")
+    
+    st.markdown("---")
+    
+    # Weekly Activity Calendar
+    st.markdown("### 📅 Weekly Activity Schedule")
+    st.caption("Users who completed onboarding and have activities scheduled")
+    
+    try:
+        # Get users with activities who have completed onboarding
+        # First, let's check what columns exist in user_activities
+        calendar_data = run_query("""
+            SELECT 
+                ua.weekday,
+                u.full_name,
+                u.id as user_id
+            FROM user_activities ua
+            JOIN users u ON ua.user_id = u.id
+            JOIN events e ON e.user_id = u.id AND e.event_type = 'onboarding_completed'
+            WHERE ua.weekday IS NOT NULL
+            ORDER BY ua.weekday, u.full_name
+        """)
+        
+        if not calendar_data.empty:
+            # Map weekday numbers to names (assuming 0=Monday or 0=Sunday)
+            weekday_names = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+            
+            # Check if weekday is numeric or string
+            sample_weekday = calendar_data['weekday'].iloc[0]
+            
+            if isinstance(sample_weekday, (int, float)) or str(sample_weekday).isdigit():
+                # Numeric weekdays - create mapping
+                calendar_data['weekday_name'] = calendar_data['weekday'].apply(
+                    lambda x: weekday_names[int(x) % 7] if pd.notna(x) else 'Unknown'
+                )
+            else:
+                # String weekdays - use as is or map common formats
+                weekday_map = {
+                    'monday': 'Mon', 'tuesday': 'Tue', 'wednesday': 'Wed',
+                    'thursday': 'Thu', 'friday': 'Fri', 'saturday': 'Sat', 'sunday': 'Sun',
+                    'mon': 'Mon', 'tue': 'Tue', 'wed': 'Wed', 'thu': 'Thu',
+                    'fri': 'Fri', 'sat': 'Sat', 'sun': 'Sun'
+                }
+                calendar_data['weekday_name'] = calendar_data['weekday'].apply(
+                    lambda x: weekday_map.get(str(x).lower().strip(), str(x)[:3].title()) if pd.notna(x) else 'Unknown'
+                )
+            
+            # Group users by weekday
+            users_by_day = {}
+            for day in weekday_names:
+                day_users = calendar_data[calendar_data['weekday_name'] == day]['full_name'].unique().tolist()
+                users_by_day[day] = day_users
+            
+            # Display as columns
+            cols = st.columns(7)
+            for i, day in enumerate(weekday_names):
+                with cols[i]:
+                    user_count = len(users_by_day.get(day, []))
+                    st.markdown(f"**{day}**")
+                    st.markdown(f"<div style='font-size: 24px; font-weight: bold; color: #00d4aa;'>{user_count}</div>", unsafe_allow_html=True)
+                    
+                    # Show user names (limit to 5 with expander for more)
+                    users = users_by_day.get(day, [])
+                    if users:
+                        display_users = users[:5]
+                        for user in display_users:
+                            st.caption(f"• {user}")
+                        if len(users) > 5:
+                            with st.expander(f"+{len(users)-5} more"):
+                                for user in users[5:]:
+                                    st.caption(f"• {user}")
+                    else:
+                        st.caption("—")
+        else:
+            st.info("No activity schedule data found")
+    except Exception as e:
+        st.warning(f"Could not load activity calendar: {e}")
     
     st.markdown("---")
     
