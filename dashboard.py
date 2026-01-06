@@ -9,6 +9,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 import os
 import json
+import pytz
 from dotenv import load_dotenv
 from datetime import datetime
 
@@ -447,6 +448,7 @@ with tab1:
         SELECT 
             m.sent_at as timestamp,
             u.full_name as user_name,
+            u.timezone as user_timezone,
             m.sender,
             m.message as raw_message
         FROM messages m
@@ -600,20 +602,37 @@ with tab1:
                 return "[Complex message]"
             return msg_str[:150] if len(msg_str) > 150 else msg_str
         
-        # Format timestamp nicely
-        def format_timestamp(ts):
+        # Format timestamp in user's local timezone
+        def format_timestamp_local(row):
+            ts = row['timestamp']
+            tz_str = row.get('user_timezone')
+            
             if pd.isna(ts):
                 return ""
             try:
+                # Parse timestamp
                 if isinstance(ts, str):
                     ts = pd.to_datetime(ts)
+                
+                # Make timezone-aware (assume UTC if naive)
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=pytz.UTC)
+                
+                # Convert to user's timezone if available
+                if tz_str and not pd.isna(tz_str):
+                    try:
+                        user_tz = pytz.timezone(tz_str)
+                        ts = ts.astimezone(user_tz)
+                    except:
+                        pass  # Keep UTC if timezone is invalid
+                
                 return ts.strftime("%b %d, %H:%M")
             except:
                 return str(ts)
         
         # Build display dataframe
         display_df = pd.DataFrame({
-            'Time': recent_messages['timestamp'].apply(format_timestamp),
+            'Time': recent_messages.apply(format_timestamp_local, axis=1),
             'User': recent_messages['user_name'].fillna('Unknown'),
             'From': recent_messages['sender'].apply(lambda x: '👤 User' if x == 'user' else '🤖 Bot'),
             'Message': recent_messages['raw_message'].apply(extract_message_text)
