@@ -115,14 +115,24 @@ def get_table_list() -> list:
 
 
 def get_table_schema(table_name: str) -> pd.DataFrame:
-    """Get schema for a specific table."""
-    query = f"""
-    SELECT column_name, data_type, is_nullable
-    FROM information_schema.columns
-    WHERE table_name = '{table_name}'
-    ORDER BY ordinal_position;
-    """
-    return run_query(query)
+    """Get schema for a specific table using parameterized query."""
+    conn = get_connection()
+    if conn is None:
+        return pd.DataFrame()
+    
+    try:
+        conn.rollback()
+        query = """
+        SELECT column_name, data_type, is_nullable
+        FROM information_schema.columns
+        WHERE table_name = %s
+        ORDER BY ordinal_position;
+        """
+        return pd.read_sql_query(query, conn, params=(table_name,))
+    except Exception as e:
+        st.error(f"Query failed: {e}")
+        st.cache_resource.clear()
+        return pd.DataFrame()
 
 
 # =============================================================================
@@ -377,8 +387,6 @@ with st.sidebar:
                     schema = get_table_schema(selected_table)
                     st.dataframe(schema, use_container_width=True, hide_index=True)
                 
-                if st.button(f"Preview {selected_table}", use_container_width=True):
-                    st.session_state['custom_query'] = f"SELECT * FROM {selected_table} LIMIT 20"
     else:
         st.error("✗ Not connected")
         st.info("Check your .env file")
@@ -392,7 +400,7 @@ with st.sidebar:
 
 
 # Main content tabs
-tab1, tab2, tab3 = st.tabs(["📊 Quick Insights", "🔍 Custom Query", "📋 Predefined Queries"])
+tab1, tab2 = st.tabs(["📊 Quick Insights", "📋 Predefined Queries"])
 
 
 # Tab 1: Quick Insights
@@ -837,55 +845,8 @@ with tab1:
         st.info("No users found or table doesn't exist yet")
 
 
-# Tab 2: Custom Query
+# Tab 2: Predefined Queries
 with tab2:
-    st.markdown("### 🔍 Run Custom SQL")
-    st.caption("Write and execute any SQL query")
-    
-    # Get query from session state or use default
-    default_query = st.session_state.get('custom_query', 'SELECT * FROM users LIMIT 10')
-    
-    custom_query = st.text_area(
-        "SQL Query",
-        value=default_query,
-        height=150,
-        key="sql_input",
-        help="Enter your SQL query here"
-    )
-    
-    col1, col2 = st.columns([1, 5])
-    with col1:
-        run_button = st.button("▶️ Run Query", type="primary", use_container_width=True)
-    with col2:
-        if st.button("🗑️ Clear", use_container_width=True):
-            st.session_state['custom_query'] = ''
-            st.rerun()
-    
-    if run_button and custom_query:
-        with st.spinner("Running query..."):
-            start_time = datetime.now()
-            result = run_query(custom_query)
-            elapsed = (datetime.now() - start_time).total_seconds()
-        
-        if not result.empty:
-            st.success(f"✓ {len(result)} rows returned in {elapsed:.2f}s")
-            st.dataframe(result, use_container_width=True, hide_index=True)
-            
-            # Download button
-            csv = result.to_csv(index=False)
-            st.download_button(
-                "📥 Download CSV",
-                csv,
-                "query_result.csv",
-                "text/csv",
-                use_container_width=False
-            )
-        else:
-            st.warning("No results or query failed")
-
-
-# Tab 3: Predefined Queries
-with tab3:
     st.markdown("### 📋 Predefined Queries")
     st.caption("Click to run common queries - edit the QUERIES dict in dashboard.py to customize")
     
