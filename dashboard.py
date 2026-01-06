@@ -462,43 +462,90 @@ with tab1:
             if pd.isna(raw_msg) or raw_msg is None:
                 return ""
             msg_str = str(raw_msg).strip()
+            
+            # Helper to recursively find text in nested dicts
+            def find_text(obj, depth=0):
+                if depth > 5:  # Prevent infinite recursion
+                    return None
+                if isinstance(obj, str):
+                    return obj if len(obj) > 2 else None
+                if isinstance(obj, dict):
+                    # Priority keys to check first
+                    for key in ['text', 'title', 'body', 'message', 'content', 'caption']:
+                        if key in obj:
+                            val = obj[key]
+                            if isinstance(val, str) and len(val) > 2:
+                                return val
+                            elif isinstance(val, dict):
+                                result = find_text(val, depth + 1)
+                                if result:
+                                    return result
+                    # Check all values
+                    for val in obj.values():
+                        result = find_text(val, depth + 1)
+                        if result:
+                            return result
+                return None
+            
             # Try to parse as JSON
             try:
                 data = json.loads(msg_str)
-                # Handle common JSON structures
                 if isinstance(data, dict):
-                    # Look for common text fields
-                    for key in ['text', 'body', 'message', 'content', 'caption']:
-                        if key in data and data[key]:
-                            return str(data[key])[:150]
+                    # Handle postback messages (button clicks)
+                    if 'postback' in data:
+                        payload = data['postback'].get('payload', {})
+                        if isinstance(payload, dict):
+                            text = payload.get('text', '')
+                            value = payload.get('value', '')
+                            if text:
+                                return f"🔘 {text}"
+                            if value:
+                                return f"🔘 [{value}]"
+                    
+                    # Handle flows messages
+                    if 'flows' in data:
+                        text = find_text(data['flows'])
+                        if text:
+                            return text[:150]
+                    
+                    # Handle quickReply messages
+                    if 'quickReply' in data:
+                        text = find_text(data['quickReply'])
+                        if text:
+                            return text[:150]
+                    
                     # Handle interactive messages
                     if 'interactive' in data:
                         interactive = data['interactive']
                         if isinstance(interactive, dict):
-                            if 'body' in interactive and interactive['body'].get('text'):
-                                return interactive['body']['text'][:150]
                             if 'button_reply' in interactive:
-                                return f"[Button: {interactive['button_reply'].get('title', '')}]"
+                                return f"🔘 {interactive['button_reply'].get('title', 'Button')}"
                             if 'list_reply' in interactive:
-                                return f"[Selected: {interactive['list_reply'].get('title', '')}]"
-                    # Handle image/document/audio
+                                return f"📋 {interactive['list_reply'].get('title', 'Selection')}"
+                            text = find_text(interactive)
+                            if text:
+                                return text[:150]
+                    
+                    # Handle media messages
                     if 'image' in data:
-                        caption = data['image'].get('caption', '')
+                        caption = find_text(data.get('image', {}))
                         return f"📷 Image{': ' + caption[:50] if caption else ''}"
                     if 'document' in data:
                         filename = data['document'].get('filename', '')
                         return f"📄 Document{': ' + filename if filename else ''}"
                     if 'audio' in data:
-                        return "🎵 Audio message"
+                        return "🎵 Audio"
                     if 'video' in data:
                         return "🎬 Video"
                     if 'location' in data:
                         return "📍 Location"
-                    # Fallback: return first string value found
-                    for v in data.values():
-                        if isinstance(v, str) and len(v) > 3:
-                            return v[:150]
-                return msg_str[:150]
+                    
+                    # Generic search for text
+                    text = find_text(data)
+                    if text:
+                        return text[:150]
+                
+                return msg_str[:100] + "..." if len(msg_str) > 100 else msg_str
             except (json.JSONDecodeError, TypeError):
                 # Not JSON, return as-is (truncated)
                 return msg_str[:150] if len(msg_str) > 150 else msg_str
