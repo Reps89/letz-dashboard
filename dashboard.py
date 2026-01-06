@@ -8,6 +8,7 @@ import pandas as pd
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import os
+import json
 from dotenv import load_dotenv
 from datetime import datetime
 
@@ -447,18 +448,91 @@ with tab1:
             m.sent_at as timestamp,
             u.full_name as user_name,
             m.sender,
-            CASE 
-                WHEN LENGTH(m.message) > 100 THEN LEFT(m.message, 100) || '...'
-                ELSE m.message 
-            END as message
+            m.message as raw_message
         FROM messages m
         LEFT JOIN users u ON m.user_id = u.id
         WHERE m.sent_at IS NOT NULL
         ORDER BY m.sent_at DESC
         LIMIT 10
     """)
+    
     if not recent_messages.empty:
-        st.dataframe(recent_messages, use_container_width=True, hide_index=True)
+        # Process messages to extract readable text from JSON
+        def extract_message_text(raw_msg):
+            if pd.isna(raw_msg) or raw_msg is None:
+                return ""
+            msg_str = str(raw_msg).strip()
+            # Try to parse as JSON
+            try:
+                data = json.loads(msg_str)
+                # Handle common JSON structures
+                if isinstance(data, dict):
+                    # Look for common text fields
+                    for key in ['text', 'body', 'message', 'content', 'caption']:
+                        if key in data and data[key]:
+                            return str(data[key])[:150]
+                    # Handle interactive messages
+                    if 'interactive' in data:
+                        interactive = data['interactive']
+                        if isinstance(interactive, dict):
+                            if 'body' in interactive and interactive['body'].get('text'):
+                                return interactive['body']['text'][:150]
+                            if 'button_reply' in interactive:
+                                return f"[Button: {interactive['button_reply'].get('title', '')}]"
+                            if 'list_reply' in interactive:
+                                return f"[Selected: {interactive['list_reply'].get('title', '')}]"
+                    # Handle image/document/audio
+                    if 'image' in data:
+                        caption = data['image'].get('caption', '')
+                        return f"📷 Image{': ' + caption[:50] if caption else ''}"
+                    if 'document' in data:
+                        filename = data['document'].get('filename', '')
+                        return f"📄 Document{': ' + filename if filename else ''}"
+                    if 'audio' in data:
+                        return "🎵 Audio message"
+                    if 'video' in data:
+                        return "🎬 Video"
+                    if 'location' in data:
+                        return "📍 Location"
+                    # Fallback: return first string value found
+                    for v in data.values():
+                        if isinstance(v, str) and len(v) > 3:
+                            return v[:150]
+                return msg_str[:150]
+            except (json.JSONDecodeError, TypeError):
+                # Not JSON, return as-is (truncated)
+                return msg_str[:150] if len(msg_str) > 150 else msg_str
+        
+        # Format timestamp nicely
+        def format_timestamp(ts):
+            if pd.isna(ts):
+                return ""
+            try:
+                if isinstance(ts, str):
+                    ts = pd.to_datetime(ts)
+                return ts.strftime("%b %d, %H:%M")
+            except:
+                return str(ts)
+        
+        # Build display dataframe
+        display_df = pd.DataFrame({
+            'Time': recent_messages['timestamp'].apply(format_timestamp),
+            'User': recent_messages['user_name'].fillna('Unknown'),
+            'From': recent_messages['sender'].apply(lambda x: '👤 User' if x == 'user' else '🤖 Bot'),
+            'Message': recent_messages['raw_message'].apply(extract_message_text)
+        })
+        
+        st.dataframe(
+            display_df, 
+            use_container_width=True, 
+            hide_index=True,
+            column_config={
+                "Time": st.column_config.TextColumn(width="small"),
+                "User": st.column_config.TextColumn(width="medium"),
+                "From": st.column_config.TextColumn(width="small"),
+                "Message": st.column_config.TextColumn(width="large"),
+            }
+        )
     else:
         st.info("No messages found")
     
