@@ -1,0 +1,554 @@
+"""
+LETZ Data Dashboard
+Simple dashboard for viewing user activities and product insights.
+"""
+
+import streamlit as st
+import pandas as pd
+import psycopg2
+from psycopg2.extras import RealDictCursor
+import os
+from dotenv import load_dotenv
+from datetime import datetime
+
+# Load environment variables
+load_dotenv()
+
+# Page config
+st.set_page_config(
+    page_title="LETZ Dashboard",
+    page_icon="📊",
+    layout="wide"
+)
+
+# Custom CSS for a clean look
+st.markdown("""
+<style>
+    .stApp {
+        background-color: #0e1117;
+    }
+    .main-header {
+        font-size: 2.5rem;
+        font-weight: 700;
+        color: #00d4aa;
+        margin-bottom: 0.5rem;
+    }
+    .sub-header {
+        font-size: 1rem;
+        color: #888;
+        margin-bottom: 2rem;
+    }
+    .metric-card {
+        background: linear-gradient(135deg, #1a1f2e 0%, #252b3b 100%);
+        border-radius: 12px;
+        padding: 1.5rem;
+        border: 1px solid #2d3748;
+    }
+    .sql-editor {
+        font-family: 'Monaco', 'Menlo', monospace;
+    }
+    div[data-testid="stExpander"] {
+        border: 1px solid #2d3748;
+        border-radius: 8px;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+
+@st.cache_resource
+def get_connection():
+    """Create database connection. Supports both local .env and Streamlit Cloud secrets."""
+    try:
+        # Try Streamlit secrets first (for cloud deployment), then fall back to .env
+        if hasattr(st, 'secrets') and 'DB_HOST' in st.secrets:
+            conn = psycopg2.connect(
+                host=st.secrets["DB_HOST"],
+                database=st.secrets["DB_NAME"],
+                user=st.secrets["DB_USER"],
+                password=st.secrets["DB_PASSWORD"],
+                port=st.secrets.get("DB_PORT", "5432")
+            )
+        else:
+            conn = psycopg2.connect(
+                host=os.getenv("DB_HOST"),
+                database=os.getenv("DB_NAME"),
+                user=os.getenv("DB_USER"),
+                password=os.getenv("DB_PASSWORD"),
+                port=os.getenv("DB_PORT", "5432")
+            )
+        return conn
+    except Exception as e:
+        st.error(f"Database connection failed: {e}")
+        return None
+
+
+def run_query(query: str) -> pd.DataFrame:
+    """Execute SQL query and return results as DataFrame."""
+    conn = get_connection()
+    if conn is None:
+        return pd.DataFrame()
+    
+    try:
+        # Check if connection is still alive
+        conn.rollback()  # Reset any failed transaction
+        return pd.read_sql_query(query, conn)
+    except Exception as e:
+        st.error(f"Query failed: {e}")
+        # Clear the cached connection if it failed
+        st.cache_resource.clear()
+        return pd.DataFrame()
+
+
+def get_table_list() -> list:
+    """Get list of all tables in the database."""
+    query = """
+    SELECT table_name 
+    FROM information_schema.tables 
+    WHERE table_schema = 'public' 
+    ORDER BY table_name;
+    """
+    df = run_query(query)
+    return df['table_name'].tolist() if not df.empty else []
+
+
+def get_table_schema(table_name: str) -> pd.DataFrame:
+    """Get schema for a specific table."""
+    query = f"""
+    SELECT column_name, data_type, is_nullable
+    FROM information_schema.columns
+    WHERE table_name = '{table_name}'
+    ORDER BY ordinal_position;
+    """
+    return run_query(query)
+
+
+# =============================================================================
+# PREDEFINED QUERIES - Edit these to customize your dashboard
+# =============================================================================
+
+QUERIES = {
+    "📊 Overview Stats": """
+-- Quick overview of key counts (deduplicated by waid)
+SELECT 
+    (SELECT COUNT(DISTINCT waid) FROM users) as total_users,
+    (SELECT COUNT(DISTINCT waid) FROM users WHERE is_active = true) as active_users,
+    (SELECT COUNT(DISTINCT waid) FROM users WHERE created_at > NOW() - INTERVAL '7 days') as new_users_7d,
+    (SELECT COUNT(DISTINCT waid) FROM users WHERE created_at > NOW() - INTERVAL '24 hours') as new_users_24h,
+    (SELECT COUNT(*) FROM user_activities WHERE completed = true) as completed_activities,
+    (SELECT COUNT(*) FROM user_milestones WHERE completed = true) as completed_milestones
+""",
+    
+    "👥 All Users": """
+-- List all unique users (deduplicated by waid, ordered by most recent)
+SELECT * FROM (
+    SELECT DISTINCT ON (waid)
+        id,
+        waid,
+        full_name,
+        gender,
+        pillar,
+        level,
+        phase,
+        is_active,
+        timezone,
+        created_at,
+        onboarding_timestamp
+    FROM users
+    ORDER BY waid, created_at DESC
+) unique_users
+ORDER BY created_at DESC
+LIMIT 100
+""",
+
+    "👤 User Details (by ID)": """
+-- Get full details for a specific user (change user_id)
+SELECT *
+FROM users
+WHERE id = 3  -- Change this ID
+""",
+    
+    "📱 Recent Events": """
+-- Recent user events/activities
+SELECT 
+    e.id,
+    e.user_id,
+    u.full_name,
+    e.event_type,
+    e.description,
+    e.executed_at,
+    e.created_at
+FROM events e
+LEFT JOIN users u ON e.user_id = u.id
+ORDER BY e.created_at DESC
+LIMIT 50
+""",
+
+    "💬 Recent Messages": """
+-- Recent WhatsApp messages
+SELECT 
+    m.id,
+    m.user_id,
+    u.full_name,
+    m.sender,
+    m.type,
+    m.message,
+    m.sent_at,
+    m.status
+FROM messages m
+LEFT JOIN users u ON m.user_id = u.id
+ORDER BY m.sent_at DESC
+LIMIT 50
+""",
+
+    "🎯 User Goals & Pillars": """
+-- Users by pillar and goal (deduplicated by waid)
+SELECT 
+    pillar,
+    goal,
+    level,
+    COUNT(DISTINCT waid) as user_count
+FROM users
+GROUP BY pillar, goal, level
+ORDER BY user_count DESC
+""",
+
+    "✅ Completed Activities": """
+-- Activities completed by users
+SELECT 
+    ua.id,
+    ua.user_id,
+    u.full_name,
+    ua.activity,
+    ua.completed,
+    ua.progress,
+    ua.created_at,
+    ua.last_activity_at
+FROM user_activities ua
+LEFT JOIN users u ON ua.user_id = u.id
+WHERE ua.completed = true
+ORDER BY ua.last_activity_at DESC
+LIMIT 50
+""",
+
+    "🏆 Milestone Progress": """
+-- User milestone completions
+SELECT 
+    um.id,
+    um.user_id,
+    u.full_name,
+    m.milestone,
+    m.type as milestone_type,
+    um.completed,
+    um.created_at
+FROM user_milestones um
+LEFT JOIN users u ON um.user_id = u.id
+LEFT JOIN milestones m ON um.milestone_id = m.id
+ORDER BY um.created_at DESC
+LIMIT 50
+""",
+
+    "📈 Daily Signups": """
+-- Signups by day (deduplicated by waid)
+SELECT 
+    DATE(created_at) as signup_date,
+    COUNT(DISTINCT waid) as signups
+FROM users
+GROUP BY DATE(created_at)
+ORDER BY signup_date DESC
+LIMIT 30
+""",
+
+    "📊 Users by Pillar": """
+-- Distribution of users by pillar (deduplicated by waid)
+SELECT 
+    pillar,
+    COUNT(DISTINCT waid) as count,
+    ROUND(100.0 * COUNT(DISTINCT waid) / SUM(COUNT(DISTINCT waid)) OVER (), 1) as percentage
+FROM users
+WHERE pillar IS NOT NULL
+GROUP BY pillar
+ORDER BY count DESC
+""",
+
+    "📊 Users by Gender": """
+-- Distribution of users by gender (deduplicated by waid)
+SELECT 
+    gender,
+    COUNT(DISTINCT waid) as count,
+    ROUND(100.0 * COUNT(DISTINCT waid) / SUM(COUNT(DISTINCT waid)) OVER (), 1) as percentage
+FROM users
+WHERE gender IS NOT NULL
+GROUP BY gender
+ORDER BY count DESC
+""",
+
+    "⏰ Activity by Hour": """
+-- Message activity by hour of day
+SELECT 
+    EXTRACT(HOUR FROM sent_at) as hour,
+    COUNT(*) as message_count
+FROM messages
+WHERE sent_at IS NOT NULL
+GROUP BY EXTRACT(HOUR FROM sent_at)
+ORDER BY hour
+""",
+
+    "🔄 User Phases": """
+-- Users by onboarding/journey phase (deduplicated by waid)
+SELECT 
+    phase,
+    COUNT(DISTINCT waid) as user_count
+FROM users
+GROUP BY phase
+ORDER BY phase
+""",
+
+    "📅 Daily Active Users": """
+-- Daily active users who SENT messages (deduplicated by waid)
+SELECT 
+    DATE(m.sent_at) as date,
+    COUNT(DISTINCT u.waid) as active_users
+FROM messages m
+LEFT JOIN users u ON m.user_id = u.id
+WHERE m.sent_at >= NOW() - INTERVAL '30 days' 
+  AND m.user_id IS NOT NULL
+  AND m.sender = 'user'
+GROUP BY DATE(m.sent_at)
+ORDER BY date DESC
+""",
+
+    "🧑 Today's Active Users": """
+-- Users who SENT messages today (deduplicated by waid)
+SELECT 
+    u.waid,
+    u.full_name,
+    u.pillar,
+    COUNT(*) as messages_sent
+FROM messages m
+LEFT JOIN users u ON m.user_id = u.id
+WHERE m.sent_at >= CURRENT_DATE 
+  AND m.user_id IS NOT NULL
+  AND m.sender = 'user'
+GROUP BY u.waid, u.full_name, u.pillar
+ORDER BY messages_sent DESC
+""",
+}
+
+
+# =============================================================================
+# MAIN DASHBOARD
+# =============================================================================
+
+st.markdown('<p class="main-header">LETZ Dashboard</p>', unsafe_allow_html=True)
+st.markdown('<p class="sub-header">User activity & product insights</p>', unsafe_allow_html=True)
+
+# Sidebar
+with st.sidebar:
+    st.markdown("### 🗄️ Database Explorer")
+    
+    # Test connection
+    conn = get_connection()
+    if conn:
+        st.success("✓ Connected to database")
+        
+        # Table explorer
+        tables = get_table_list()
+        if tables:
+            st.markdown("**Tables:**")
+            selected_table = st.selectbox("Select table", tables, label_visibility="collapsed")
+            
+            if selected_table:
+                with st.expander(f"📋 Schema: {selected_table}"):
+                    schema = get_table_schema(selected_table)
+                    st.dataframe(schema, use_container_width=True, hide_index=True)
+                
+                if st.button(f"Preview {selected_table}", use_container_width=True):
+                    st.session_state['custom_query'] = f"SELECT * FROM {selected_table} LIMIT 20"
+    else:
+        st.error("✗ Not connected")
+        st.info("Check your .env file")
+    
+    st.markdown("---")
+    st.markdown("### ⚙️ Settings")
+    auto_refresh = st.checkbox("Auto-refresh (60s)", value=False)
+    
+    if auto_refresh:
+        st.cache_resource.clear()
+
+
+# Main content tabs
+tab1, tab2, tab3 = st.tabs(["📊 Quick Insights", "🔍 Custom Query", "📋 Predefined Queries"])
+
+
+# Tab 1: Quick Insights
+with tab1:
+    col1, col2, col3, col4 = st.columns(4)
+    
+    # Try to get quick stats (all deduplicated by waid)
+    try:
+        # User count (unique waids)
+        user_count = run_query("SELECT COUNT(DISTINCT waid) as count FROM users")
+        if not user_count.empty:
+            col1.metric("Total Users", user_count['count'].iloc[0])
+        else:
+            col1.metric("Total Users", "—")
+    except:
+        col1.metric("Total Users", "—")
+    
+    try:
+        # Today's users (unique waids)
+        today_users = run_query("""
+            SELECT COUNT(DISTINCT waid) as count FROM users 
+            WHERE created_at >= CURRENT_DATE
+        """)
+        if not today_users.empty:
+            col2.metric("New Today", today_users['count'].iloc[0])
+        else:
+            col2.metric("New Today", "—")
+    except:
+        col2.metric("New Today", "—")
+    
+    try:
+        # This week's users (unique waids)
+        week_users = run_query("""
+            SELECT COUNT(DISTINCT waid) as count FROM users 
+            WHERE created_at >= CURRENT_DATE - INTERVAL '7 days'
+        """)
+        if not week_users.empty:
+            col3.metric("New This Week", week_users['count'].iloc[0])
+        else:
+            col3.metric("New This Week", "—")
+    except:
+        col3.metric("New This Week", "—")
+    
+    try:
+        # Active today (unique waids who SENT a message today)
+        active_today = run_query("""
+            SELECT COUNT(DISTINCT u.waid) as count 
+            FROM messages m
+            JOIN users u ON m.user_id = u.id
+            WHERE m.sent_at >= CURRENT_DATE 
+              AND m.user_id IS NOT NULL
+              AND m.sender = 'user'
+        """)
+        if not active_today.empty:
+            col4.metric("Active Today", active_today['count'].iloc[0])
+        else:
+            col4.metric("Active Today", "—")
+    except:
+        col4.metric("Active Today", "—")
+    
+    st.markdown("---")
+    
+    # Recent messages section
+    st.markdown("### 💬 Recent Messages")
+    recent_messages = run_query("""
+        SELECT 
+            m.sent_at as timestamp,
+            u.full_name as user_name,
+            m.sender,
+            CASE 
+                WHEN LENGTH(m.message) > 100 THEN LEFT(m.message, 100) || '...'
+                ELSE m.message 
+            END as message
+        FROM messages m
+        LEFT JOIN users u ON m.user_id = u.id
+        WHERE m.sent_at IS NOT NULL
+        ORDER BY m.sent_at DESC
+        LIMIT 10
+    """)
+    if not recent_messages.empty:
+        st.dataframe(recent_messages, use_container_width=True, hide_index=True)
+    else:
+        st.info("No messages found")
+    
+    st.markdown("---")
+    
+    # Recent users (deduplicated by waid, showing 10 most recent unique users)
+    st.markdown("### 👥 Recent Users")
+    recent_users = run_query("""
+        SELECT * FROM (
+            SELECT DISTINCT ON (waid) id, waid, full_name, gender, pillar, level, phase, is_active, created_at 
+            FROM users 
+            ORDER BY waid, created_at DESC
+        ) unique_users
+        ORDER BY created_at DESC
+        LIMIT 10
+    """)
+    if not recent_users.empty:
+        st.dataframe(recent_users, use_container_width=True, hide_index=True)
+    else:
+        st.info("No users found or table doesn't exist yet")
+
+
+# Tab 2: Custom Query
+with tab2:
+    st.markdown("### 🔍 Run Custom SQL")
+    st.caption("Write and execute any SQL query")
+    
+    # Get query from session state or use default
+    default_query = st.session_state.get('custom_query', 'SELECT * FROM users LIMIT 10')
+    
+    custom_query = st.text_area(
+        "SQL Query",
+        value=default_query,
+        height=150,
+        key="sql_input",
+        help="Enter your SQL query here"
+    )
+    
+    col1, col2 = st.columns([1, 5])
+    with col1:
+        run_button = st.button("▶️ Run Query", type="primary", use_container_width=True)
+    with col2:
+        if st.button("🗑️ Clear", use_container_width=True):
+            st.session_state['custom_query'] = ''
+            st.rerun()
+    
+    if run_button and custom_query:
+        with st.spinner("Running query..."):
+            start_time = datetime.now()
+            result = run_query(custom_query)
+            elapsed = (datetime.now() - start_time).total_seconds()
+        
+        if not result.empty:
+            st.success(f"✓ {len(result)} rows returned in {elapsed:.2f}s")
+            st.dataframe(result, use_container_width=True, hide_index=True)
+            
+            # Download button
+            csv = result.to_csv(index=False)
+            st.download_button(
+                "📥 Download CSV",
+                csv,
+                "query_result.csv",
+                "text/csv",
+                use_container_width=False
+            )
+        else:
+            st.warning("No results or query failed")
+
+
+# Tab 3: Predefined Queries
+with tab3:
+    st.markdown("### 📋 Predefined Queries")
+    st.caption("Click to run common queries - edit the QUERIES dict in dashboard.py to customize")
+    
+    for query_name, query_sql in QUERIES.items():
+        with st.expander(query_name):
+            st.code(query_sql, language="sql")
+            
+            if st.button(f"Run: {query_name}", key=f"run_{query_name}"):
+                with st.spinner("Running..."):
+                    result = run_query(query_sql)
+                
+                if not result.empty:
+                    st.success(f"✓ {len(result)} rows")
+                    st.dataframe(result, use_container_width=True, hide_index=True)
+                else:
+                    st.warning("No results - table may not exist or is empty")
+
+
+# Footer
+st.markdown("---")
+st.caption(f"LETZ Data Dashboard • Last refreshed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
