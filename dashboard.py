@@ -410,7 +410,7 @@ tab1, tab2 = st.tabs(["📊 Quick Insights", "🔍 User Deep Dive"])
 
 # Tab 1: Quick Insights
 with tab1:
-    col1, col2, col3, col4, col5, col6 = st.columns(6)
+    col1, col2, col3, col4, col5, col6, col7 = st.columns(7)
     
     # Try to get quick stats (all deduplicated by waid)
     try:
@@ -497,6 +497,18 @@ with tab1:
         col6.metric("Templates Sent 24h", templates_24h)
     except:
         col6.metric("Templates Sent 24h", "—")
+    
+    try:
+        today_day = datetime.utcnow().strftime("%A")
+        activity_today_df = run_query(f"""
+            SELECT COUNT(DISTINCT user_id) as count
+            FROM user_activities
+            WHERE days::jsonb ? '{today_day}'
+        """)
+        activity_today = activity_today_df['count'].iloc[0] if not activity_today_df.empty else 0
+        col7.metric("Activity Today", activity_today, today_day)
+    except:
+        col7.metric("Activity Today", "—")
     
     st.markdown("---")
     
