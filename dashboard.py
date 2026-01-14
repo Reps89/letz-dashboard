@@ -24,6 +24,38 @@ st.set_page_config(
     layout="wide"
 )
 
+# Simple password protection (per-session)
+AUTH_USERNAME = "admin"
+AUTH_PASSWORD = "letzdoit2026!"
+
+if "auth" not in st.session_state:
+    st.session_state.auth = {"logged_in": False}
+
+def render_login():
+    st.title("LETZ Dashboard Login")
+    with st.form("login_form"):
+        user = st.text_input("Username")
+        pwd = st.text_input("Password", type="password")
+        submitted = st.form_submit_button("Login")
+        if submitted:
+            if user == AUTH_USERNAME and pwd == AUTH_PASSWORD:
+                st.session_state.auth["logged_in"] = True
+                st.success("Logged in")
+                st.experimental_rerun()
+            else:
+                st.error("Invalid credentials")
+
+# Force login before showing the app
+if not st.session_state.auth.get("logged_in"):
+    render_login()
+    st.stop()
+
+# Logout control
+with st.sidebar:
+    if st.button("Logout"):
+        st.session_state.auth["logged_in"] = False
+        st.experimental_rerun()
+
 # Custom CSS for a clean look
 st.markdown("""
 <style>
