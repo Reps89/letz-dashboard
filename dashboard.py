@@ -566,6 +566,100 @@ with tab1:
     except:
         st.warning("Could not load Templates 24h list")
     
+    st.markdown("### 🪜 Recovery Ladder")
+    try:
+        # Conversion rates 24h / 72h
+        conversion_df = run_query("""
+            WITH sent AS (
+                SELECT DISTINCT user_id FROM recovery_logs
+            ),
+            conv24 AS (
+                SELECT DISTINCT r.user_id
+                FROM recovery_logs r
+                JOIN messages m ON m.user_id = r.user_id
+                WHERE m.sender = 'user'
+                  AND m.sent_at > r.sent_at
+                  AND m.sent_at <= r.sent_at + INTERVAL '24 hours'
+            ),
+            conv72 AS (
+                SELECT DISTINCT r.user_id
+                FROM recovery_logs r
+                JOIN messages m ON m.user_id = r.user_id
+                WHERE m.sender = 'user'
+                  AND m.sent_at > r.sent_at
+                  AND m.sent_at <= r.sent_at + INTERVAL '72 hours'
+            )
+            SELECT 
+                (SELECT COUNT(*) FROM sent) AS total_users,
+                (SELECT COUNT(*) FROM conv24) AS conv24_users,
+                (SELECT COUNT(*) FROM conv72) AS conv72_users
+        """)
+        total_sent_users = conversion_df['total_users'].iloc[0] if not conversion_df.empty else 0
+        conv24_users = conversion_df['conv24_users'].iloc[0] if not conversion_df.empty else 0
+        conv72_users = conversion_df['conv72_users'].iloc[0] if not conversion_df.empty else 0
+        conv24_pct = round(100 * conv24_users / total_sent_users, 1) if total_sent_users else 0
+        conv72_pct = round(100 * conv72_users / total_sent_users, 1) if total_sent_users else 0
+
+        # Ladder drop-off by step and template
+        dropoff_df = run_query("""
+            SELECT 
+                COALESCE(ladder_step, 0) AS ladder_step,
+                COALESCE(template_name, 'Unknown') AS template_name,
+                COUNT(*) AS sends
+            FROM recovery_logs
+            GROUP BY ladder_step, template_name
+            ORDER BY ladder_step, sends DESC
+            LIMIT 50
+        """)
+
+        # Time to reactivation (avg/median hours)
+        reactivation_df = run_query("""
+            WITH first_reply AS (
+                SELECT 
+                    r.id AS rec_id,
+                    r.user_id,
+                    r.sent_at,
+                    MIN(m.sent_at) AS reply_at
+                FROM recovery_logs r
+                JOIN messages m ON m.user_id = r.user_id AND m.sender = 'user' AND m.sent_at > r.sent_at
+                GROUP BY r.id, r.user_id, r.sent_at
+            )
+            SELECT 
+                AVG(EXTRACT(EPOCH FROM (reply_at - sent_at)))/3600 AS avg_hours,
+                percentile_cont(0.5) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (reply_at - sent_at))/3600) AS median_hours
+            FROM first_reply
+        """)
+        avg_hours = round(reactivation_df['avg_hours'].iloc[0], 1) if not reactivation_df.empty and pd.notna(reactivation_df['avg_hours'].iloc[0]) else None
+        median_hours = round(reactivation_df['median_hours'].iloc[0], 1) if not reactivation_df.empty and pd.notna(reactivation_df['median_hours'].iloc[0]) else None
+
+        # Users with multiple sends (2nd / 3rd+ ladder steps)
+        multi_send_df = run_query("""
+            SELECT 
+                COUNT(*) FILTER (WHERE send_count >= 2) AS users_2_plus,
+                COUNT(*) FILTER (WHERE send_count >= 3) AS users_3_plus
+            FROM (
+                SELECT user_id, COUNT(*) AS send_count
+                FROM recovery_logs
+                GROUP BY user_id
+            ) t
+        """)
+        users_2_plus = multi_send_df['users_2_plus'].iloc[0] if not multi_send_df.empty else 0
+        users_3_plus = multi_send_df['users_3_plus'].iloc[0] if not multi_send_df.empty else 0
+
+        rcol1, rcol2, rcol3, rcol4 = st.columns(4)
+        rcol1.metric("Conv 24h", f"{conv24_pct}%", f"{conv24_users}/{total_sent_users} users")
+        rcol2.metric("Conv 72h", f"{conv72_pct}%", f"{conv72_users}/{total_sent_users} users")
+        rcol3.metric("Avg → Reactivation (h)", avg_hours if avg_hours is not None else "—", f"median {median_hours} h" if median_hours is not None else None)
+        rcol4.metric("Users 2nd/3rd+", f"{users_2_plus} / {users_3_plus}")
+
+        with st.expander("Ladder drop-off by step & template", expanded=False):
+            if dropoff_df.empty:
+                st.caption("No recovery logs yet")
+            else:
+                st.dataframe(dropoff_df, use_container_width=True, hide_index=True)
+    except Exception as e:
+        st.warning(f"Could not load recovery ladder stats: {e}")
+    
     st.markdown("---")
     
     # User Journey Stats
@@ -1214,6 +1308,60 @@ with tab2:
                 return True
         outside_24h_flag = is_outside_24h(last_msg_df['sent_at'].iloc[0]) if not last_msg_df.empty else True
         
+        # Recovery stats for this user
+        user_recovery_df = run_query(f"""
+            SELECT 
+                id,
+                ladder_step,
+                template_name,
+                converted,
+                sent_at
+            FROM recovery_logs
+            WHERE user_id = {user_id}
+            ORDER BY sent_at DESC
+            LIMIT 10
+        """)
+        user_recovery_count = len(user_recovery_df) if not user_recovery_df.empty else 0
+        last_recovery_name = user_recovery_df['template_name'].iloc[0] if not user_recovery_df.empty else "—"
+        last_recovery_step = user_recovery_df['ladder_step'].iloc[0] if not user_recovery_df.empty else None
+        last_recovery_time = format_ts_local(user_recovery_df['sent_at'].iloc[0]) if not user_recovery_df.empty else "—"
+        
+        # Conversion after last recovery (24h/72h) and time to reply
+        conv_after_df = run_query(f"""
+            WITH last_rec AS (
+                SELECT sent_at
+                FROM recovery_logs
+                WHERE user_id = {user_id}
+                ORDER BY sent_at DESC
+                LIMIT 1
+            ),
+            reply AS (
+                SELECT m.sent_at
+                FROM messages m, last_rec lr
+                WHERE m.user_id = {user_id}
+                  AND m.sender = 'user'
+                  AND m.sent_at > lr.sent_at
+                ORDER BY m.sent_at
+                LIMIT 1
+            )
+            SELECT 
+                CASE WHEN EXISTS (
+                    SELECT 1 FROM reply r, last_rec lr
+                    WHERE r.sent_at <= lr.sent_at + INTERVAL '24 hours'
+                ) THEN true ELSE false END AS conv24,
+                CASE WHEN EXISTS (
+                    SELECT 1 FROM reply r, last_rec lr
+                    WHERE r.sent_at <= lr.sent_at + INTERVAL '72 hours'
+                ) THEN true ELSE false END AS conv72,
+                (SELECT EXTRACT(EPOCH FROM (r.sent_at - lr.sent_at))/3600
+                 FROM reply r, last_rec lr
+                 LIMIT 1) AS hours_to_reply
+        """)
+        conv24 = bool(conv_after_df['conv24'].iloc[0]) if not conv_after_df.empty else False
+        conv72 = bool(conv_after_df['conv72'].iloc[0]) if not conv_after_df.empty else False
+        hrs_reply = conv_after_df['hours_to_reply'].iloc[0] if not conv_after_df.empty else None
+        hrs_reply_fmt = f"{hrs_reply:.1f} h" if hrs_reply is not None and pd.notna(hrs_reply) else "—"
+        
         # Activity plan (schedule) from user_activities
         plan_df = run_query(f"""
             SELECT 
@@ -1275,13 +1423,15 @@ with tab2:
                             next_activity_day = week_full[idx]
         
         # Metrics row
-        m1, m2, m3, m4, m5, m6 = st.columns(6)
+        m1, m2, m3, m4, m5, m6, m7, m8 = st.columns(8)
         m1.metric("⭐ XP Earned", total_xp)
         m2.metric("✅ Last Completed", last_activity_name, last_activity_time)
         m3.metric("⏭️ Next Activity", next_activity_name, next_activity_day)
         m4.metric("⏱️ Last Active", last_active)
         m5.metric("💬 Messages Sent (24h)", count_24h, f"3d: {count_3d} • 7d: {count_7d}")
         m6.metric("Outside 24h", "Yes" if outside_24h_flag else "No")
+        m7.metric("Recovery Sends", user_recovery_count, f"Last: {last_recovery_time}")
+        m8.metric("Recovery Conversion", "✓ 24h" if conv24 else ("✓ 72h" if conv72 else "—"), hrs_reply_fmt)
         
         # Activity plan weekly calendar
         st.markdown("#### 📅 Activity Plan (weekly)")
@@ -1386,6 +1536,7 @@ with tab2:
         if messages_df.empty:
             st.info("No messages found for this user.")
         else:
+            # Reuse global is_template helper from Quick Insights section
             history_df = pd.DataFrame({
                 "Time": messages_df['sent_at'].apply(format_ts_local),
                 "From": messages_df['sender'].apply(lambda x: '👤 User' if x == 'user' else '🤖 Bot'),
