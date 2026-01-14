@@ -600,141 +600,82 @@ with tab1:
                 return ""
             msg_str = str(raw_msg).strip()
             
-            # Helper to parse JSON (handles double-encoded strings)
             def parse_json(s):
                 try:
                     data = json.loads(s)
-                    # If result is still a string, try parsing again (double-encoded)
-                    if isinstance(data, str):
+                    if isinstance(data, str):  # handle double-encoded
                         try:
                             return json.loads(data)
-                        except:
+                        except Exception:
                             return data
                     return data
-                except:
+                except Exception:
                     return None
             
-            # Helper to recursively find text in nested dicts
             def find_text(obj, depth=0):
-                if depth > 10:
+                if depth > 10 or obj is None:
                     return None
                 if isinstance(obj, str) and len(obj) > 2:
                     return obj
                 if isinstance(obj, dict):
-                    # Priority: check 'text' key first at any level
-                    if 'text' in obj:
-                        val = obj['text']
-                        if isinstance(val, str) and len(val) > 2:
-                            return val
-                    # Then check other common keys
-                    for key in ['title', 'body', 'message', 'content', 'caption']:
+                    for key in ["text", "body", "title", "message", "content", "caption", "label", "description", "value"]:
                         if key in obj:
                             val = obj[key]
                             if isinstance(val, str) and len(val) > 2:
                                 return val
-                            result = find_text(val, depth + 1)
-                            if result:
-                                return result
-                    # Check all other values
+                            found = find_text(val, depth + 1)
+                            if found:
+                                return found
+                    # payloads often carry text
+                    if "payload" in obj:
+                        payload = obj["payload"]
+                        if isinstance(payload, str):
+                            pj = parse_json(payload)
+                            if isinstance(pj, (dict, list)):
+                                found = find_text(pj, depth + 1)
+                                if found:
+                                    return found
+                            if len(payload) > 2:
+                                return payload
+                        else:
+                            found = find_text(payload, depth + 1)
+                            if found:
+                                return found
                     for val in obj.values():
-                        if isinstance(val, (dict, list)):
-                            result = find_text(val, depth + 1)
-                            if result:
-                                return result
+                        if isinstance(val, (dict, list, str)):
+                            found = find_text(val, depth + 1)
+                            if found:
+                                return found
                 if isinstance(obj, list):
                     for item in obj:
-                        result = find_text(item, depth + 1)
-                        if result:
-                            return result
+                        found = find_text(item, depth + 1)
+                        if found:
+                            return found
                 return None
             
-            # Parse the JSON
             data = parse_json(msg_str)
             
             if isinstance(data, dict):
-                # === WHATSAPP MESSAGE TYPES ===
-                
-                # 1. Flows messages: {"flows": {"body": {"text": "..."}}}
-                if 'flows' in data:
-                    text = find_text(data['flows'])
-                    if text:
-                        return text[:200]
-                
-                # 2. QuickReply messages: {"quickReply": {"body": {"text": "..."}}}
-                if 'quickReply' in data:
-                    text = find_text(data['quickReply'])
-                    if text:
-                        return text[:200]
-                
-                # 3. Postback (button click): {"postback": {"payload": {"text": "...", "value": "..."}}}
-                if 'postback' in data:
-                    payload = data['postback'].get('payload', {})
-                    if isinstance(payload, str):
-                        try:
-                            payload = json.loads(payload)
-                        except:
-                            return f"🔘 {payload[:100]}"
-                    if isinstance(payload, dict):
-                        text = payload.get('text', '')
-                        value = payload.get('value', '')
-                        if text:
-                            # Clean up unicode escapes
-                            return f"🔘 {text}"
-                        if value:
-                            return f"🔘 [{value}]"
-                    text = find_text(data['postback'])
-                    if text:
-                        return f"🔘 {text[:100]}"
-                
-                # 4. Interactive messages
-                if 'interactive' in data:
-                    interactive = data['interactive']
-                    if isinstance(interactive, dict):
-                        if 'button_reply' in interactive:
-                            return f"🔘 {interactive['button_reply'].get('title', 'Button')}"
-                        if 'list_reply' in interactive:
-                            return f"📋 {interactive['list_reply'].get('title', 'Selection')}"
-                        text = find_text(interactive)
-                        if text:
-                            return text[:200]
-                
-                # 5. Media messages
-                if 'image' in data:
-                    caption = find_text(data.get('image', {}))
-                    return f"📷 Image{': ' + caption[:80] if caption else ''}"
-                if 'document' in data:
-                    doc = data['document']
-                    filename = doc.get('filename', '') if isinstance(doc, dict) else ''
-                    return f"📄 Document{': ' + filename if filename else ''}"
-                if 'audio' in data:
-                    return "🎵 Audio message"
-                if 'video' in data:
-                    return "🎬 Video"
-                if 'sticker' in data:
-                    return "😀 Sticker"
-                if 'location' in data:
-                    return "📍 Location"
-                if 'contacts' in data:
-                    return "👤 Contact shared"
-                
-                # 6. Template messages
-                if 'template' in data:
-                    text = find_text(data['template'])
-                    if text:
-                        return text[:200]
-                
-                # 7. Generic fallback - find any text
-                text = find_text(data)
-                if text:
-                    return text[:200]
+                if "interactive" in data:
+                    found = find_text(data["interactive"])
+                    if found:
+                        return found[:200]
+                if "postback" in data:
+                    found = find_text(data["postback"])
+                    if found:
+                        return found[:200]
             
-            # If data is a plain string (not dict), return it
+            if data is not None:
+                found = find_text(data)
+                if found:
+                    return found[:200]
+            
             if isinstance(data, str) and len(data) > 2:
                 return data[:200]
             
-            # Last resort: return truncated original (but try to show it's JSON)
+            # Fallback: show truncated payload instead of "[Complex message]"
             if msg_str.startswith('{') or msg_str.startswith('['):
-                return "[Complex message]"
+                return msg_str[:200]
             return msg_str[:150] if len(msg_str) > 150 else msg_str
         
         # Parse timezone string like "UTC-3", "-3", "America/Sao_Paulo"
@@ -914,48 +855,70 @@ with tab1:
                 return "—"
             msg_str = str(raw_msg).strip()
             
-            # Try to parse JSON and find text
+            def parse_json(s):
+                try:
+                    data = json.loads(s)
+                    if isinstance(data, str):
+                        try:
+                            return json.loads(data)
+                        except Exception:
+                            return data
+                    return data
+                except Exception:
+                    return None
+            
             def find_text(obj, depth=0):
-                if depth > 5:
+                if depth > 10 or obj is None:
                     return None
                 if isinstance(obj, str) and len(obj) > 2:
                     return obj
                 if isinstance(obj, dict):
-                    for key in ['text', 'body', 'title', 'message', 'content', 'caption']:
+                    for key in ["text", "body", "title", "message", "content", "caption", "label", "description", "value"]:
                         if key in obj:
                             val = obj[key]
                             if isinstance(val, str) and len(val) > 2:
                                 return val
-                            result = find_text(val, depth + 1)
-                            if result:
-                                return result
+                            found = find_text(val, depth + 1)
+                            if found:
+                                return found
+                    if "payload" in obj:
+                        payload = obj["payload"]
+                        if isinstance(payload, str):
+                            pj = parse_json(payload)
+                            if isinstance(pj, (dict, list)):
+                                found = find_text(pj, depth + 1)
+                                if found:
+                                    return found
+                            if len(payload) > 2:
+                                return payload
+                        else:
+                            found = find_text(payload, depth + 1)
+                            if found:
+                                return found
                     for val in obj.values():
-                        if isinstance(val, (dict, list)):
-                            result = find_text(val, depth + 1)
-                            if result:
-                                return result
+                        if isinstance(val, (dict, list, str)):
+                            found = find_text(val, depth + 1)
+                            if found:
+                                return found
                 if isinstance(obj, list):
                     for item in obj:
-                        result = find_text(item, depth + 1)
-                        if result:
-                            return result
+                        found = find_text(item, depth + 1)
+                        if found:
+                            return found
                 return None
             
-            try:
-                data = json.loads(msg_str)
-                # Handle double-encoded JSON
-                if isinstance(data, str):
-                    try:
-                        data = json.loads(data)
-                    except:
-                        return data[:80] if len(data) > 80 else data
-                
-                text = find_text(data)
-                if text:
-                    return text[:80] + "..." if len(text) > 80 else text
-                return "[Complex message]"
-            except:
-                return msg_str[:80] + "..." if len(msg_str) > 80 else msg_str
+            data = parse_json(msg_str)
+            if data is not None:
+                found = find_text(data)
+                if found:
+                    return found[:80] + "..." if len(found) > 80 else found
+            
+            if isinstance(data, str) and len(data) > 2:
+                return data[:80] if len(data) > 80 else data
+            
+            if msg_str.startswith("{") or msg_str.startswith("["):
+                return msg_str[:80]
+            return msg_str[:80] if len(msg_str) > 80 else msg_str
         
         # Build display dataframe
         display_df = pd.DataFrame({
@@ -1201,21 +1164,70 @@ with tab2:
             if pd.isna(raw_msg) or raw_msg is None:
                 return ""
             msg_str = str(raw_msg).strip()
-            try:
-                data = json.loads(msg_str)
-                if isinstance(data, dict):
-                    for key in ['text', 'body', 'message', 'title', 'content', 'caption']:
-                        if key in data and isinstance(data[key], str) and len(data[key]) > 2:
-                            return data[key][:200]
-                    return "[Complex message]"
-                if isinstance(data, list):
-                    for item in data:
-                        if isinstance(item, str) and len(item) > 2:
-                            return item[:200]
-                if isinstance(data, str) and len(data) > 2:
-                    return data[:200]
-            except:
-                pass
+            
+            def parse_json(s):
+                try:
+                    data = json.loads(s)
+                    if isinstance(data, str):
+                        try:
+                            return json.loads(data)
+                        except Exception:
+                            return data
+                    return data
+                except Exception:
+                    return None
+            
+            def find_text(obj, depth=0):
+                if depth > 10 or obj is None:
+                    return None
+                if isinstance(obj, str) and len(obj) > 2:
+                    return obj
+                if isinstance(obj, dict):
+                    for key in ["text", "body", "title", "message", "content", "caption", "label", "description", "value"]:
+                        if key in obj:
+                            val = obj[key]
+                            if isinstance(val, str) and len(val) > 2:
+                                return val
+                            found = find_text(val, depth + 1)
+                            if found:
+                                return found
+                    if "payload" in obj:
+                        payload = obj["payload"]
+                        if isinstance(payload, str):
+                            pj = parse_json(payload)
+                            if isinstance(pj, (dict, list)):
+                                found = find_text(pj, depth + 1)
+                                if found:
+                                    return found
+                            if len(payload) > 2:
+                                return payload
+                        else:
+                            found = find_text(payload, depth + 1)
+                            if found:
+                                return found
+                    for val in obj.values():
+                        if isinstance(val, (dict, list, str)):
+                            found = find_text(val, depth + 1)
+                            if found:
+                                return found
+                if isinstance(obj, list):
+                    for item in obj:
+                        found = find_text(item, depth + 1)
+                        if found:
+                            return found
+                return None
+            
+            data = parse_json(msg_str)
+            if data is not None:
+                found = find_text(data)
+                if found:
+                    return found[:200]
+            
+            if isinstance(data, str) and len(data) > 2:
+                return data[:200]
+            
+            if msg_str.startswith("{") or msg_str.startswith("["):
+                return msg_str[:200]
             return msg_str[:200]
         
         if messages_df.empty:
