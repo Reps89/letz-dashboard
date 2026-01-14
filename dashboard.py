@@ -621,6 +621,28 @@ with tab1:
                 return ""
             msg_str = str(raw_msg).strip()
             
+            def is_template(raw_msg):
+                if pd.isna(raw_msg) or raw_msg is None:
+                    return False
+                msg_str = str(raw_msg).strip()
+                try:
+                    data = json.loads(msg_str)
+                    if isinstance(data, str):
+                        try:
+                            data = json.loads(data)
+                        except Exception:
+                            pass
+                    if isinstance(data, dict):
+                        if 'template' in data:
+                            return True
+                        if data.get('type') == 'template':
+                            return True
+                    if isinstance(data, str) and 'template' in data.lower():
+                        return True
+                except Exception:
+                    return False
+                return False
+            
             def parse_json(s):
                 try:
                     data = json.loads(s)
@@ -683,6 +705,10 @@ with tab1:
                         return found[:200]
                 if "postback" in data:
                     found = find_text(data["postback"])
+                    if found:
+                        return found[:200]
+                if "template" in data:
+                    found = find_text(data["template"])
                     if found:
                         return found[:200]
             
@@ -760,7 +786,8 @@ with tab1:
             'Time': recent_messages.apply(format_timestamp_local, axis=1),
             'User': recent_messages['user_name'].fillna('Unknown'),
             'From': recent_messages['sender'].apply(lambda x: '👤 User' if x == 'user' else '🤖 Bot'),
-            'Message': recent_messages['raw_message'].apply(extract_message_text)
+            'Message': recent_messages['raw_message'].apply(extract_message_text),
+            'Template?': recent_messages['raw_message'].apply(lambda x: 'Yes' if is_template(x) else 'No')
         })
         
         st.dataframe(
@@ -807,6 +834,13 @@ with tab1:
             FROM messages m
             WHERE m.sender != 'user'
             ORDER BY m.user_id, m.sent_at DESC
+        ),
+        recovery_counts AS (
+            SELECT 
+                user_id,
+                COUNT(*) AS recovery_templates_sent
+            FROM recovery_logs
+            GROUP BY user_id
         )
         SELECT 
             u.id,
@@ -827,10 +861,12 @@ with tab1:
             CASE 
                 WHEN u.updated_at < NOW() - INTERVAL '24 hours' THEN true 
                 ELSE false 
-            END as outside_24h
+            END as outside_24h,
+            COALESCE(rc.recovery_templates_sent, 0) AS recovery_templates_sent
         FROM unique_users u
         LEFT JOIN last_sent ls ON u.id = ls.user_id
         LEFT JOIN last_received lr ON u.id = lr.user_id
+        LEFT JOIN recovery_counts rc ON u.id = rc.user_id
         ORDER BY u.created_at DESC
     """)
     
@@ -978,6 +1014,7 @@ with tab1:
             'Signed Up': all_users.apply(lambda r: format_ts(r['created_at'], r['timezone']), axis=1),
             'Last Active': all_users.apply(lambda r: format_ts(r['last_sent_at'], r['timezone']), axis=1),
             'Outside 24h': all_users.apply(lambda r: 'Yes' if is_outside_24h(r['last_sent_at']) else 'No', axis=1),
+            'Recovery Templates Sent': all_users['recovery_templates_sent'].fillna(0).astype(int) if 'recovery_templates_sent' in all_users.columns else 0,
             'Last Sent': all_users.apply(lambda r: format_ts(r['last_sent_at'], r['timezone']), axis=1),
             'Last Sent Msg': all_users['last_sent_msg'].apply(extract_msg),
             'Last Received': all_users.apply(lambda r: format_ts(r['last_received_at'], r['timezone']), axis=1),
