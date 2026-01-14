@@ -960,11 +960,21 @@ with tab1:
             except Exception:
                 return True
         
+        # Fetch total XP per user (user_id) for display; left join-like via map
+        xp_df = run_query("""
+            SELECT user_id, COALESCE(SUM(xp_earned), 0) AS total_xp
+            FROM user_activities_history
+            GROUP BY user_id
+        """)
+        xp_map = {}
+        if not xp_df.empty and 'user_id' in xp_df.columns and 'total_xp' in xp_df.columns:
+            xp_map = dict(zip(xp_df['user_id'], xp_df['total_xp']))
+        
         display_df = pd.DataFrame({
             'Name': all_users['full_name'].fillna('Unknown'),
             'WhatsApp ID': all_users['waid'],
             'Level': all_users['level'].fillna('—'),
-            'Phase': all_users['phase'].fillna('—'),
+            'XP': all_users['id'].map(xp_map).fillna(0).astype(int) if 'id' in all_users.columns else 0,
             'Signed Up': all_users.apply(lambda r: format_ts(r['created_at'], r['timezone']), axis=1),
             'Last Active': all_users.apply(lambda r: format_ts(r['last_sent_at'], r['timezone']), axis=1),
             'Outside 24h': all_users.apply(lambda r: 'Yes' if is_outside_24h(r['last_sent_at']) else 'No', axis=1),
