@@ -41,7 +41,10 @@ def render_login():
             if user == AUTH_USERNAME and pwd == AUTH_PASSWORD:
                 st.session_state.auth["logged_in"] = True
                 st.success("Logged in")
-                st.experimental_rerun()
+                try:
+                    st.rerun()
+                except Exception:
+                    st.experimental_rerun()
             else:
                 st.error("Invalid credentials")
 
