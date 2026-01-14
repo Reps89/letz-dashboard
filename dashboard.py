@@ -566,6 +566,74 @@ with tab1:
     except:
         st.warning("Could not load Templates 24h list")
     
+    # User Journey Stats
+    st.markdown("### 🎯 User Journey Progress")
+    
+    try:
+        # Get total unique users count
+        total_users_result = run_query("SELECT COUNT(DISTINCT waid) as total FROM users")
+        total_users = total_users_result['total'].iloc[0] if not total_users_result.empty else 0
+        
+        if total_users > 0:
+            # Get counts for each journey milestone from events table
+            journey_stats = run_query("""
+                SELECT 
+                    event_type,
+                    COUNT(DISTINCT user_id) as user_count
+                FROM events
+                WHERE event_type IN ('onboarding_completed', 'update_experience', 'settings_updated')
+                GROUP BY event_type
+            """)
+            
+            # Convert to dict for easy lookup
+            stats_dict = {}
+            if not journey_stats.empty:
+                for _, row in journey_stats.iterrows():
+                    stats_dict[row['event_type']] = row['user_count']
+            
+            # Get unique users who completed an activity (have completed_at timestamp in user_activities_history)
+            # This is also the count for "Earned XP" since completing activity = earning XP
+            completed_activities_result = run_query("""
+                SELECT COUNT(DISTINCT user_id) as count
+                FROM user_activities_history
+                WHERE completed_at IS NOT NULL
+            """)
+            completed_activities_count = completed_activities_result['count'].iloc[0] if not completed_activities_result.empty else 0
+            
+            # Calculate percentages
+            onboarding_pct = round(100 * stats_dict.get('onboarding_completed', 0) / total_users, 1)
+            activity_pct = round(100 * completed_activities_count / total_users, 1)
+            xp_pct = activity_pct  # Same as completed activity - completing activity = earning XP
+            settings_pct = round(100 * stats_dict.get('settings_updated', 0) / total_users, 1)
+            
+            # Display as metrics
+            jcol1, jcol2, jcol3, jcol4 = st.columns(4)
+            jcol1.metric(
+                "✅ Completed Onboarding", 
+                f"{onboarding_pct}%",
+                f"{stats_dict.get('onboarding_completed', 0)} users"
+            )
+            jcol2.metric(
+                "🏃 Completed Activity", 
+                f"{activity_pct}%",
+                f"{completed_activities_count} users"
+            )
+            jcol3.metric(
+                "⭐ Earned XP", 
+                f"{xp_pct}%",
+                f"{completed_activities_count} users"
+            )
+            jcol4.metric(
+                "⚙️ Updated Settings", 
+                f"{settings_pct}%",
+                f"{stats_dict.get('settings_updated', 0)} users"
+            )
+            
+        else:
+            st.info("No users found")
+    except Exception as e:
+        st.warning(f"Could not load journey stats: {e}")
+    
     st.markdown("### 🪜 Recovery Ladder")
     try:
         # Conversion rates 24h / 72h
@@ -659,76 +727,6 @@ with tab1:
                 st.dataframe(dropoff_df, use_container_width=True, hide_index=True)
     except Exception as e:
         st.warning(f"Could not load recovery ladder stats: {e}")
-    
-    st.markdown("---")
-    
-    # User Journey Stats
-    st.markdown("### 🎯 User Journey Progress")
-    
-    try:
-        # Get total unique users count
-        total_users_result = run_query("SELECT COUNT(DISTINCT waid) as total FROM users")
-        total_users = total_users_result['total'].iloc[0] if not total_users_result.empty else 0
-        
-        if total_users > 0:
-            # Get counts for each journey milestone from events table
-            journey_stats = run_query("""
-                SELECT 
-                    event_type,
-                    COUNT(DISTINCT user_id) as user_count
-                FROM events
-                WHERE event_type IN ('onboarding_completed', 'update_experience', 'settings_updated')
-                GROUP BY event_type
-            """)
-            
-            # Convert to dict for easy lookup
-            stats_dict = {}
-            if not journey_stats.empty:
-                for _, row in journey_stats.iterrows():
-                    stats_dict[row['event_type']] = row['user_count']
-            
-            # Get unique users who completed an activity (have completed_at timestamp in user_activities_history)
-            # This is also the count for "Earned XP" since completing activity = earning XP
-            completed_activities_result = run_query("""
-                SELECT COUNT(DISTINCT user_id) as count
-                FROM user_activities_history
-                WHERE completed_at IS NOT NULL
-            """)
-            completed_activities_count = completed_activities_result['count'].iloc[0] if not completed_activities_result.empty else 0
-            
-            # Calculate percentages
-            onboarding_pct = round(100 * stats_dict.get('onboarding_completed', 0) / total_users, 1)
-            activity_pct = round(100 * completed_activities_count / total_users, 1)
-            xp_pct = activity_pct  # Same as completed activity - completing activity = earning XP
-            settings_pct = round(100 * stats_dict.get('settings_updated', 0) / total_users, 1)
-            
-            # Display as metrics
-            jcol1, jcol2, jcol3, jcol4 = st.columns(4)
-            jcol1.metric(
-                "✅ Completed Onboarding", 
-                f"{onboarding_pct}%",
-                f"{stats_dict.get('onboarding_completed', 0)} users"
-            )
-            jcol2.metric(
-                "🏃 Completed Activity", 
-                f"{activity_pct}%",
-                f"{completed_activities_count} users"
-            )
-            jcol3.metric(
-                "⭐ Earned XP", 
-                f"{xp_pct}%",
-                f"{completed_activities_count} users"
-            )
-            jcol4.metric(
-                "⚙️ Updated Settings", 
-                f"{settings_pct}%",
-                f"{stats_dict.get('settings_updated', 0)} users"
-            )
-            
-        else:
-            st.info("No users found")
-    except Exception as e:
-        st.warning(f"Could not load journey stats: {e}")
     
     st.markdown("---")
     
