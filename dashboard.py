@@ -784,7 +784,7 @@ with tab1:
     all_users = run_query("""
         WITH unique_users AS (
             SELECT DISTINCT ON (waid) 
-                id, waid, full_name, gender, pillar, level, phase, is_active, timezone, created_at 
+                id, waid, full_name, gender, pillar, level, phase, is_active, timezone, created_at, updated_at
             FROM users 
             ORDER BY waid, created_at DESC
         ),
@@ -820,7 +820,12 @@ with tab1:
             ls.last_sent_at,
             ls.last_sent_msg,
             lr.last_received_at,
-            lr.last_received_msg
+            lr.last_received_msg,
+            u.updated_at,
+            CASE 
+                WHEN u.updated_at < NOW() - INTERVAL '24 hours' THEN true 
+                ELSE false 
+            END as outside_24h
         FROM unique_users u
         LEFT JOIN last_sent ls ON u.id = ls.user_id
         LEFT JOIN last_received lr ON u.id = lr.user_id
@@ -946,6 +951,8 @@ with tab1:
             'Level': all_users['level'].fillna('—'),
             'Phase': all_users['phase'].fillna('—'),
             'Signed Up': all_users.apply(lambda r: format_ts(r['created_at'], r['timezone']), axis=1),
+            'Last Active': all_users.apply(lambda r: format_ts(r['updated_at'], r['timezone']), axis=1),
+            'Outside 24h': all_users['outside_24h'].apply(lambda x: 'Yes' if bool(x) else 'No'),
             'Last Sent': all_users.apply(lambda r: format_ts(r['last_sent_at'], r['timezone']), axis=1),
             'Last Sent Msg': all_users['last_sent_msg'].apply(extract_msg),
             'Last Received': all_users.apply(lambda r: format_ts(r['last_received_at'], r['timezone']), axis=1),
