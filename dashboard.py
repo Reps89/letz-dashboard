@@ -468,15 +468,17 @@ with tab1:
         col4.metric("Active Today", "—")
     
     try:
-        # Users outside the 24h window (no interactions in last 24h using users.updated_at)
+        # Users outside the 24h window based on last user message (sender='user')
         if 'total_users_count' not in locals():
             user_count_df = run_query("SELECT COUNT(DISTINCT waid) as count FROM users")
             total_users_count = user_count_df['count'].iloc[0] if not user_count_df.empty else 0
         
         active_24h_df = run_query("""
-            SELECT COUNT(DISTINCT waid) as count
-            FROM users
-            WHERE updated_at >= NOW() - INTERVAL '24 hours'
+            SELECT COUNT(DISTINCT u.waid) as count
+            FROM messages m
+            JOIN users u ON m.user_id = u.id
+            WHERE m.sender = 'user'
+              AND m.sent_at >= NOW() - INTERVAL '24 hours'
         """)
         active_24h = active_24h_df['count'].iloc[0] if not active_24h_df.empty else 0
         outside = max(total_users_count - active_24h, 0)
@@ -945,14 +947,27 @@ with tab1:
             return msg_str[:80] if len(msg_str) > 80 else msg_str
         
         # Build display dataframe
+        def is_outside_24h(ts):
+            if ts is None or pd.isna(ts):
+                return True
+            try:
+                t = pd.to_datetime(ts)
+                if t.tzinfo is None:
+                    t = t.tz_localize(pytz.UTC)
+                cutoff = pd.Timestamp.utcnow().tz_localize(None) if pd.Timestamp.utcnow().tzinfo else pd.Timestamp.utcnow()
+                cutoff = cutoff.tz_localize(pytz.UTC) if cutoff.tzinfo is None else cutoff
+                return t < cutoff - pd.Timedelta(hours=24)
+            except Exception:
+                return True
+        
         display_df = pd.DataFrame({
             'Name': all_users['full_name'].fillna('Unknown'),
             'WhatsApp ID': all_users['waid'],
             'Level': all_users['level'].fillna('—'),
             'Phase': all_users['phase'].fillna('—'),
             'Signed Up': all_users.apply(lambda r: format_ts(r['created_at'], r['timezone']), axis=1),
-            'Last Active': all_users.apply(lambda r: format_ts(r['updated_at'], r['timezone']), axis=1),
-            'Outside 24h': all_users['outside_24h'].apply(lambda x: 'Yes' if bool(x) else 'No'),
+            'Last Active': all_users.apply(lambda r: format_ts(r['last_sent_at'], r['timezone']), axis=1),
+            'Outside 24h': all_users.apply(lambda r: 'Yes' if is_outside_24h(r['last_sent_at']) else 'No', axis=1),
             'Last Sent': all_users.apply(lambda r: format_ts(r['last_sent_at'], r['timezone']), axis=1),
             'Last Sent Msg': all_users['last_sent_msg'].apply(extract_msg),
             'Last Received': all_users.apply(lambda r: format_ts(r['last_received_at'], r['timezone']), axis=1),
