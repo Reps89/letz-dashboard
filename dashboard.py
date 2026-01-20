@@ -11,13 +11,11 @@ import os
 import json
 import re
 import pytz
-from pathlib import Path
 from dotenv import load_dotenv
 from datetime import datetime, timedelta, timezone
 
-# Load environment variables from .env next to this file (fallback to cwd)
-DOTENV_PATH = Path(__file__).resolve().parent / ".env"
-load_dotenv(DOTENV_PATH)
+# Load environment variables
+load_dotenv()
 
 # Page config
 st.set_page_config(
@@ -30,105 +28,8 @@ st.set_page_config(
 AUTH_USERNAME = "admin"
 AUTH_PASSWORD = "letzdoit2026!"
 
-# App timezone for date-dependent calculations (defaults to UTC)
-APP_TIMEZONE = os.getenv("APP_TIMEZONE", "UTC")
-
-# Database environment selection
-DEFAULT_DB_ENV = os.getenv("DB_ENV", "production").lower()
-DB_ENV_OPTIONS = ["production", "development"]
-
-
-def _env_prefix(env: str) -> str:
-    """Return env prefix for environment variables."""
-    env = (env or "").lower()
-    if env == "production":
-        return "PRODUCTION"
-    if env == "development":
-        return "DEVELOPMENT"
-    return env.upper()
-
-
-def load_db_config(env: str) -> dict:
-    """
-    Load DB connection settings for given environment.
-    Prefers Streamlit secrets section [env], then environment variables using
-    prefixes like PRODUCTION_DB_HOST / DEVELOPMENT_DB_HOST.
-    Falls back to legacy unprefixed keys (DB_HOST, DB_NAME, etc.).
-    """
-    env = (env or DEFAULT_DB_ENV).lower()
-
-    # 1) Streamlit secrets section
-    try:
-        if hasattr(st, "secrets"):
-            secrets_keys = list(getattr(st, "secrets", {}).keys())
-            if env in st.secrets:
-                sec = st.secrets[env]
-                return {
-                    "host": sec.get("DB_HOST"),
-                    "database": sec.get("DB_NAME"),
-                    "user": sec.get("DB_USER"),
-                    "password": sec.get("DB_PASSWORD"),
-                    "port": sec.get("DB_PORT", "5432"),
-                    "_source": f"secrets[{env}]",
-                    "_secrets_keys": secrets_keys,
-                }
-            # Fallback: legacy top-level secrets keys
-            if "DB_HOST" in st.secrets:
-                sec = st.secrets
-                return {
-                    "host": sec.get("DB_HOST"),
-                    "database": sec.get("DB_NAME"),
-                    "user": sec.get("DB_USER"),
-                    "password": sec.get("DB_PASSWORD"),
-                    "port": sec.get("DB_PORT", "5432"),
-                    "_source": "secrets[top-level]",
-                    "_secrets_keys": secrets_keys,
-                }
-    except Exception:
-        pass
-
-    # 2) Environment variables with prefix
-    prefix = _env_prefix(env)
-    host = os.getenv(f"{prefix}_DB_HOST")
-    name = os.getenv(f"{prefix}_DB_NAME")
-    user = os.getenv(f"{prefix}_DB_USER")
-    pwd = os.getenv(f"{prefix}_DB_PASSWORD")
-    port = os.getenv(f"{prefix}_DB_PORT", "5432")
-
-    # 3) Fallback: legacy unprefixed env vars
-    if not host:
-        host = os.getenv("DB_HOST")
-        name = name or os.getenv("DB_NAME")
-        user = user or os.getenv("DB_USER")
-        pwd = pwd or os.getenv("DB_PASSWORD")
-        port = os.getenv("DB_PORT", port)
-
-    # Surface missing host for diagnostics
-    if not host:
-        st.warning(f"DB host not found for env '{env}'. Check .env or secrets.", icon="⚠️")
-
-    return {
-        "host": host,
-        "database": name,
-        "user": user,
-        "password": pwd,
-        "port": port,
-        "_source": f"env:{prefix}" if host else "env:legacy-or-missing",
-    }
-
-
-def get_app_timezone():
-    """Return configured tzinfo, falling back to UTC on errors."""
-    try:
-        return pytz.timezone(APP_TIMEZONE)
-    except Exception:
-        return pytz.UTC
-
 if "auth" not in st.session_state:
     st.session_state.auth = {"logged_in": False}
-
-if "db_env" not in st.session_state:
-    st.session_state.db_env = DEFAULT_DB_ENV if DEFAULT_DB_ENV in DB_ENV_OPTIONS else "production"
 
 def render_login():
     st.title("LETZ Dashboard Login")
@@ -193,14 +94,31 @@ st.markdown("""
 
 
 @st.cache_resource
-def get_connection(env: str):
-    """Create database connection for selected environment."""
+def get_connection():
+    """Create database connection. Supports both local .env and Streamlit Cloud secrets."""
     try:
-        cfg = load_db_config(env)
-        if not cfg.get("host"):
-            st.error(f"Missing DB credentials for '{env}' environment.")
-            return None
-        conn = psycopg2.connect(**cfg)
+        # Try Streamlit secrets first (for cloud deployment)
+        try:
+            if hasattr(st, 'secrets') and 'DB_HOST' in st.secrets:
+                conn = psycopg2.connect(
+                    host=st.secrets["DB_HOST"],
+                    database=st.secrets["DB_NAME"],
+                    user=st.secrets["DB_USER"],
+                    password=st.secrets["DB_PASSWORD"],
+                    port=st.secrets.get("DB_PORT", "5432")
+                )
+                return conn
+        except:
+            pass  # No secrets.toml, fall back to .env
+        
+        # Fall back to .env
+        conn = psycopg2.connect(
+            host=os.getenv("DB_HOST"),
+            database=os.getenv("DB_NAME"),
+            user=os.getenv("DB_USER"),
+            password=os.getenv("DB_PASSWORD"),
+            port=os.getenv("DB_PORT", "5432")
+        )
         return conn
     except Exception as e:
         st.error(f"Database connection failed: {e}")
@@ -209,8 +127,7 @@ def get_connection(env: str):
 
 def run_query(query: str) -> pd.DataFrame:
     """Execute SQL query and return results as DataFrame."""
-    env = st.session_state.get("db_env", DEFAULT_DB_ENV)
-    conn = get_connection(env)
+    conn = get_connection()
     if conn is None:
         return pd.DataFrame()
     
@@ -239,8 +156,7 @@ def get_table_list() -> list:
 
 def get_table_schema(table_name: str) -> pd.DataFrame:
     """Get schema for a specific table using parameterized query."""
-    env = st.session_state.get("db_env", DEFAULT_DB_ENV)
-    conn = get_connection(env)
+    conn = get_connection()
     if conn is None:
         return pd.DataFrame()
     
@@ -495,35 +411,10 @@ st.markdown('<p class="sub-header">User activity & product insights</p>', unsafe
 with st.sidebar:
     st.markdown("### 🗄️ Database Explorer")
     
-    # Environment toggle
-    selected_env = st.radio(
-        "Database environment",
-        DB_ENV_OPTIONS,
-        index=DB_ENV_OPTIONS.index(st.session_state.db_env) if st.session_state.db_env in DB_ENV_OPTIONS else 0,
-        horizontal=True,
-    )
-    if selected_env != st.session_state.db_env:
-        st.session_state.db_env = selected_env
-        st.cache_resource.clear()  # reset cached connections when env changes
-        st.experimental_rerun()
-    
-    # Connection diagnostics
-    with st.expander("DB config (masked)", expanded=False):
-        cfg = load_db_config(st.session_state.db_env)
-        st.write({
-            "env_selected": st.session_state.db_env,
-            "host_present": bool(cfg.get("host")),
-            "name_present": bool(cfg.get("database")),
-            "user_present": bool(cfg.get("user")),
-            "port": cfg.get("port"),
-            "source": cfg.get("_source", "unknown"),
-            "secrets_keys": cfg.get("_secrets_keys", []),
-        })
-
     # Test connection
-    conn = get_connection(st.session_state.db_env)
+    conn = get_connection()
     if conn:
-        st.success(f"✓ Connected to {st.session_state.db_env}")
+        st.success("✓ Connected to database")
         
         # Table explorer
         tables = get_table_list()
@@ -643,7 +534,7 @@ with tab1:
         col6.metric("Templates Sent 24h", "—")
     
     try:
-        today_day = datetime.now(get_app_timezone()).strftime("%A")
+        today_day = datetime.utcnow().strftime("%A")
         activity_today_df = run_query(f"""
             SELECT COUNT(DISTINCT user_id) as count
             FROM user_activities
@@ -1546,7 +1437,7 @@ with tab2:
         calendar = {day: [] for day in week_short}
         next_activity_name = "—"
         next_activity_day = "—"
-        today_idx = datetime.now(get_app_timezone()).weekday()  # Monday = 0
+        today_idx = datetime.utcnow().weekday()  # Monday = 0
         best_delta = None
         
         if not plan_df.empty:
