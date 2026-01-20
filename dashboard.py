@@ -175,6 +175,36 @@ def get_table_schema(table_name: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+def is_template(raw_msg) -> bool:
+    """Check if a message payload is a WhatsApp template message.
+    
+    Templates are identified by a "notification" key in the JSON payload,
+    e.g. {"notification": {"name": "template_name", "locale": "pt_br", ...}}
+    """
+    if pd.isna(raw_msg) or raw_msg is None:
+        return False
+    msg_str = str(raw_msg).strip()
+    try:
+        data = json.loads(msg_str)
+        if isinstance(data, str):
+            try:
+                data = json.loads(data)
+            except Exception:
+                pass
+        if isinstance(data, dict):
+            # WhatsApp template messages have a "notification" key
+            if 'notification' in data:
+                return True
+            # Also check for legacy/alternative template indicators
+            if 'template' in data:
+                return True
+            if data.get('type') == 'template':
+                return True
+    except Exception:
+        return False
+    return False
+
+
 # =============================================================================
 # PREDEFINED QUERIES - Edit these to customize your dashboard
 # =============================================================================
@@ -549,8 +579,12 @@ with tab1:
     try:
         new_today_list = run_query("""
             SELECT COALESCE(full_name, 'Unknown') AS name
-            FROM users
-            WHERE created_at >= CURRENT_DATE
+            FROM (
+                SELECT DISTINCT ON (waid) full_name, created_at
+                FROM users
+                WHERE created_at >= CURRENT_DATE
+                ORDER BY waid, created_at DESC
+            ) unique_users
             ORDER BY created_at DESC
             LIMIT 200
         """)
@@ -782,29 +816,6 @@ with tab1:
     """)
     
     if not recent_messages.empty:
-        # Helper to check if message payload is a template
-        def is_template(raw_msg):
-            if pd.isna(raw_msg) or raw_msg is None:
-                return False
-            msg_str = str(raw_msg).strip()
-            try:
-                data = json.loads(msg_str)
-                if isinstance(data, str):
-                    try:
-                        data = json.loads(data)
-                    except Exception:
-                        pass
-                if isinstance(data, dict):
-                    if 'template' in data:
-                        return True
-                    if data.get('type') == 'template':
-                        return True
-                if isinstance(data, str) and 'template' in data.lower():
-                    return True
-            except Exception:
-                return False
-            return False
-        
         # Process messages to extract readable text from JSON
         def extract_message_text(raw_msg):
             if pd.isna(raw_msg) or raw_msg is None:
@@ -974,6 +985,91 @@ with tab1:
     
     st.markdown("---")
     
+    # User Activity by Hour chart
+    st.markdown("### 📊 User Activity by Hour")
+    
+    # Date range selector
+    date_col1, date_col2 = st.columns(2)
+    with date_col1:
+        default_start = datetime.now() - timedelta(days=7)
+        start_date = st.date_input("Start date", value=default_start, key="activity_start")
+    with date_col2:
+        end_date = st.date_input("End date", value=datetime.now(), key="activity_end")
+    
+    try:
+        # Query message activity by hour for the selected date range (user messages only)
+        activity_by_hour = run_query(f"""
+            SELECT 
+                EXTRACT(HOUR FROM sent_at) as hour,
+                COUNT(*) as message_count
+            FROM messages
+            WHERE sent_at >= '{start_date}'::date
+              AND sent_at < '{end_date}'::date + INTERVAL '1 day'
+              AND sender = 'user'
+              AND sent_at IS NOT NULL
+            GROUP BY EXTRACT(HOUR FROM sent_at)
+            ORDER BY hour
+        """)
+        
+        if not activity_by_hour.empty:
+            # Fill in missing hours with 0
+            all_hours = pd.DataFrame({'hour': range(24)})
+            activity_by_hour['hour'] = activity_by_hour['hour'].astype(int)
+            activity_data = all_hours.merge(activity_by_hour, on='hour', how='left').fillna(0)
+            activity_data['message_count'] = activity_data['message_count'].astype(int)
+            
+            # Format hour labels (e.g., "6am", "2pm")
+            def format_hour(h):
+                if h == 0:
+                    return "12am"
+                elif h < 12:
+                    return f"{h}am"
+                elif h == 12:
+                    return "12pm"
+                else:
+                    return f"{h-12}pm"
+            
+            activity_data['hour_label'] = activity_data['hour'].apply(format_hour)
+            
+            # Create bar chart using Altair for better control
+            import altair as alt
+            
+            chart = alt.Chart(activity_data).mark_bar(
+                color='#00d4aa',
+                cornerRadiusTopLeft=3,
+                cornerRadiusTopRight=3
+            ).encode(
+                x=alt.X('hour_label:N', 
+                        sort=list(activity_data['hour_label']),
+                        title='Hour of Day',
+                        axis=alt.Axis(labelAngle=-45)),
+                y=alt.Y('message_count:Q', title='Messages'),
+                tooltip=[
+                    alt.Tooltip('hour_label:N', title='Hour'),
+                    alt.Tooltip('message_count:Q', title='Messages')
+                ]
+            ).properties(
+                height=300
+            ).configure_axis(
+                grid=True,
+                gridColor='#2d3748'
+            ).configure_view(
+                strokeWidth=0
+            )
+            
+            st.altair_chart(chart, use_container_width=True)
+            
+            # Show summary stats
+            total_msgs = activity_data['message_count'].sum()
+            peak_hour = activity_data.loc[activity_data['message_count'].idxmax()]
+            st.caption(f"Total: {total_msgs:,} user messages • Peak hour: {peak_hour['hour_label']} ({int(peak_hour['message_count'])} messages)")
+        else:
+            st.info("No message activity found for the selected date range")
+    except Exception as e:
+        st.warning(f"Could not load activity chart: {e}")
+    
+    st.markdown("---")
+    
     # All users (deduplicated by waid) with last message info
     st.markdown("### 👥 All Users")
     
@@ -1025,11 +1121,6 @@ with tab1:
             ls.last_sent_msg,
             lr.last_received_at,
             lr.last_received_msg,
-            u.updated_at,
-            CASE 
-                WHEN u.updated_at < NOW() - INTERVAL '24 hours' THEN true 
-                ELSE false 
-            END as outside_24h,
             COALESCE(rc.recovery_templates_sent, 0) AS recovery_templates_sent
         FROM unique_users u
         LEFT JOIN last_sent ls ON u.id = ls.user_id
@@ -1219,13 +1310,16 @@ with tab2:
     st.caption("Select a user to view messages, activity plan, XP, and engagement")
     
     users_df = run_query("""
-        SELECT 
-            id,
-            COALESCE(full_name, 'Unknown') as full_name,
-            waid,
-            timezone,
-            created_at
-        FROM users
+        SELECT * FROM (
+            SELECT DISTINCT ON (waid)
+                id,
+                COALESCE(full_name, 'Unknown') as full_name,
+                waid,
+                timezone,
+                created_at
+            FROM users
+            ORDER BY waid, created_at DESC
+        ) unique_users
         ORDER BY created_at DESC
         LIMIT 500
     """)
@@ -1569,7 +1663,6 @@ with tab2:
         if messages_df.empty:
             st.info("No messages found for this user.")
         else:
-            # Reuse global is_template helper from Quick Insights section
             history_df = pd.DataFrame({
                 "Time": messages_df['sent_at'].apply(format_ts_local),
                 "From": messages_df['sender'].apply(lambda x: '👤 User' if x == 'user' else '🤖 Bot'),
