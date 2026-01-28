@@ -14,6 +14,11 @@ import pytz
 from dotenv import load_dotenv
 from datetime import datetime, timedelta, timezone
 
+try:
+    from deep_translator import GoogleTranslator  # type: ignore
+except ImportError:  # pragma: no cover - optional dependency
+    GoogleTranslator = None
+
 # Load environment variables
 load_dotenv()
 
@@ -641,12 +646,12 @@ with tab1:
     st.markdown("### 🎯 User Journey Progress")
     
     try:
-        # Get total unique users count
+        # Get total unique users count (deduplicated by waid)
         total_users_result = run_query("SELECT COUNT(DISTINCT waid) as total FROM users")
         total_users = total_users_result['total'].iloc[0] if not total_users_result.empty else 0
         
         if total_users > 0:
-            # Get counts for each journey milestone from events table
+            # Get counts for each journey milestone from events table (unique users per event_type)
             journey_stats = run_query("""
                 SELECT 
                     event_type,
@@ -667,26 +672,48 @@ with tab1:
                 SELECT COUNT(DISTINCT user_id) as count
                 FROM ai_companion_flows
                 WHERE type = 'post_onboarding'
-                AND content->>'slogan' IS NOT NULL
+                  AND content->>'slogan' IS NOT NULL
             """)
             added_slogan_count = added_slogan_result['count'].iloc[0] if not added_slogan_result.empty else 0
             
-            # Get unique users who completed an activity (have completed_at timestamp in user_activities_history)
+            # Get unique users who completed at least one activity
             completed_activities_result = run_query("""
                 SELECT COUNT(DISTINCT user_id) as count
                 FROM user_activities_history
                 WHERE completed_at IS NOT NULL
             """)
             completed_activities_count = completed_activities_result['count'].iloc[0] if not completed_activities_result.empty else 0
+
+            # Get unique users who have sent at least one audio message
+            audio_users_result = run_query("""
+                SELECT COUNT(DISTINCT user_id) as count
+                FROM messages
+                WHERE sender = 'user'
+                  AND user_id IS NOT NULL
+                  AND type = 'audio'
+            """)
+            audio_users_count = audio_users_result['count'].iloc[0] if not audio_users_result.empty else 0
+
+            # Get unique users who have sent at least one picture/image message
+            image_users_result = run_query("""
+                SELECT COUNT(DISTINCT user_id) as count
+                FROM messages
+                WHERE sender = 'user'
+                  AND user_id IS NOT NULL
+                  AND type IN ('image', 'photo')
+            """)
+            image_users_count = image_users_result['count'].iloc[0] if not image_users_result.empty else 0
             
             # Calculate percentages
             onboarding_pct = round(100 * stats_dict.get('onboarding_completed', 0) / total_users, 1)
             slogan_pct = round(100 * added_slogan_count / total_users, 1)
             activity_pct = round(100 * completed_activities_count / total_users, 1)
             settings_pct = round(100 * stats_dict.get('settings_updated', 0) / total_users, 1)
+            audio_pct = round(100 * audio_users_count / total_users, 1) if total_users else 0
+            image_pct = round(100 * image_users_count / total_users, 1) if total_users else 0
             
-            # Display as metrics
-            jcol1, jcol2, jcol3, jcol4 = st.columns(4)
+            # Display as metrics (all based on unique users)
+            jcol1, jcol2, jcol3, jcol4, jcol5, jcol6 = st.columns(6)
             jcol1.metric(
                 "✅ Completed Onboarding", 
                 f"{onboarding_pct}%",
@@ -706,6 +733,16 @@ with tab1:
                 "⚙️ Updated Settings", 
                 f"{settings_pct}%",
                 f"{stats_dict.get('settings_updated', 0)} users"
+            )
+            jcol5.metric(
+                "🎧 Sent Audio", 
+                f"{audio_pct}%",
+                f"{audio_users_count} users"
+            )
+            jcol6.metric(
+                "📷 Sent Picture", 
+                f"{image_pct}%",
+                f"{image_users_count} users"
             )
             
         else:
@@ -892,6 +929,11 @@ with tab1:
     if not recent_messages.empty:
         # Process messages to extract readable text from JSON
         def extract_message_text(raw_msg):
+            """Extract the most human-readable text from a message payload.
+
+            NOTE: this intentionally returns the full text without truncation
+            so Recent Messages always shows the complete content.
+            """
             if pd.isna(raw_msg) or raw_msg is None:
                 return ""
             msg_str = str(raw_msg).strip()
@@ -952,31 +994,46 @@ with tab1:
             data = parse_json(msg_str)
             
             if isinstance(data, dict):
-                if "interactive" in data:
-                    found = find_text(data["interactive"])
-                    if found:
-                        return found[:200]
-                if "postback" in data:
-                    found = find_text(data["postback"])
-                    if found:
-                        return found[:200]
-                if "template" in data:
-                    found = find_text(data["template"])
-                    if found:
-                        return found[:200]
+                for key in ["interactive", "postback", "template"]:
+                    if key in data:
+                        found = find_text(data[key])
+                        if found:
+                            return found
             
             if data is not None:
                 found = find_text(data)
                 if found:
-                    return found[:200]
+                    return found
             
             if isinstance(data, str) and len(data) > 2:
-                return data[:200]
+                return data
             
-            # Fallback: show truncated payload instead of "[Complex message]"
+            # Fallback: show payload itself (untrimmed) if it looks like JSON,
+            # otherwise return the original string.
             if msg_str.startswith('{') or msg_str.startswith('['):
-                return msg_str[:200]
-            return msg_str[:150] if len(msg_str) > 150 else msg_str
+                return msg_str
+            return msg_str
+
+        # Simple cached English translation helper (optional if deep_translator is installed)
+        if "recent_msg_translations" not in st.session_state:
+            st.session_state.recent_msg_translations = {}
+
+        def translate_to_english(text: str) -> str:
+            if not text:
+                return ""
+            # If translator library is unavailable, just return original text
+            if GoogleTranslator is None:
+                return text
+            cache = st.session_state.recent_msg_translations
+            if text in cache:
+                return cache[text]
+            try:
+                translated = GoogleTranslator(source="auto", target="en").translate(text)
+                cache[text] = translated
+                return translated
+            except Exception:
+                # If translation fails, just return original text so the table still renders
+                return text
         
         # Parse timezone string like "UTC-3", "-3", "America/Sao_Paulo"
         def parse_timezone(tz_str):
@@ -1040,6 +1097,7 @@ with tab1:
             'User': recent_messages['user_name'].fillna('Unknown'),
             'From': recent_messages['sender'].apply(lambda x: '👤 User' if x == 'user' else '🤖 Bot'),
             'Message': recent_messages['raw_message'].apply(extract_message_text),
+            'Message (EN)': recent_messages['raw_message'].apply(lambda x: translate_to_english(extract_message_text(x))),
             'Template?': recent_messages['raw_message'].apply(lambda x: 'Yes' if is_template(x) else 'No')
         })
         
@@ -1052,6 +1110,7 @@ with tab1:
                 "User": st.column_config.TextColumn(width="medium"),
                 "From": st.column_config.TextColumn(width="small"),
                 "Message": st.column_config.TextColumn(width="large"),
+                "Message (EN)": st.column_config.TextColumn(width="large"),
             }
         )
     else:

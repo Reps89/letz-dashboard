@@ -154,7 +154,7 @@ To change, edit these values directly. For production, consider moving to `st.se
 
 ### Tab 1: Quick Insights
 - **Metric cards**: Total users, new signups (today/week), active users, outside-24h-window count
-- **User Journey Progress**: Onboarding completion, activity completion, XP earned, settings updated
+- **User Journey Progress**: Onboarding completion, added slogan, activity completion, settings updated
 - **Recovery Ladder**: Conversion rates (24h/72h), time-to-reactivation, ladder step drop-off
 - **Recent Messages**: Live feed of the latest 10 messages with JSON payload parsing
 - **All Users Table**: Expandable list with last activity, recovery template count, and CSV export
@@ -205,6 +205,15 @@ The dashboard parses various timezone formats stored in the `users.timezone` col
 - UTC offsets: `"UTC-3"`, `"GMT+5:30"`, `"-3"`
 
 Timestamps are converted to users' local time for display.
+
+### 24-Hour Active Window for Check-ins
+**Important**: Check-ins are only sent to users who have been active within the last 24 hours. 
+
+**Definition of "Active"**: A user is considered active if they have either:
+- Sent a user message (`messages.sender = 'user'`), OR
+- Completed an activity (`user_activities_history.completed_at`)
+
+**Analyst Note**: If you see users not receiving check-ins despite having `check_in_time` set and `skip_check_in = false`, check their last user activity timestamp. They are likely outside the 24h active window.
 
 ### Message JSON Parsing
 The `messages.message` column contains nested JSON payloads. The dashboard recursively extracts readable text from structures like:
