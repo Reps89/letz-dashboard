@@ -29,9 +29,25 @@ st.set_page_config(
     layout="wide"
 )
 
-# Simple password protection (per-session)
-AUTH_USERNAME = "admin"
-AUTH_PASSWORD = "letzdoit2026!"
+# REDIRECT TO NEW APP - Add this section
+NEW_DASHBOARD_URL = "https://letz-dashboard.streamlit.app"  # Replace with your new app URL
+
+st.markdown(f"""
+<script>
+    window.location.href = "{NEW_DASHBOARD_URL}";
+</script>
+""", unsafe_allow_html=True)
+
+st.title("Dashboard Moved")
+st.info("This dashboard has moved to a new location. Redirecting...")
+st.link_button("Click here if you're not redirected", NEW_DASHBOARD_URL)
+
+# Stop execution here - don't run the rest of the dashboard
+st.stop()
+
+# Load environment variables
+load_dotenv()
+
 
 if "auth" not in st.session_state:
     st.session_state.auth = {"logged_in": False}
